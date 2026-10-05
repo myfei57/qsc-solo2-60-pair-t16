@@ -32,7 +32,7 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
     rt.flow_repository.record(Sensor(flow=flow, turbidity=mix(samples)))
     rt.trend.record(flow)
     coag_dose = rt.coag_doser.update_flow_and_dose(flow)
-    turb_dose = rt.sampler.judge(samples)
+    turb = rt.sampler.judge(samples, request.str_field("reading_id"))
     ph_verdict = rt.stabilizer.stabilize()
     rt.well.update_residual_demand(demand)
     chlor_dose = rt.chlor_doser.apply_residual() if ph_verdict.stable else 0.0
@@ -46,7 +46,9 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
     return json_response(
         {
             "coag_dose": coag_dose,
-            "turb_dose": turb_dose,
+            "turb_dose": turb.dose,
+            "turb_tier": turb.tier,
+            "turb_degraded": turb.degraded,
             "chlor_dose": chlor_dose,
             "min_level": min_level,
             "level": rt.well.level(),

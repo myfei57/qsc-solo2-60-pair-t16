@@ -131,7 +131,9 @@ class ConsoleCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["dose"], 1500.0)
         status, body = self.call("POST", "/coag/turbidity", {"samples": [4.0, 6.0]})
-        self.assertEqual(body["dose"], 5.0)
+        self.assertEqual(body["dose"], 6.0)
+        self.assertEqual(body["tier"], "exceed")
+        self.assertEqual(body["tier_label"], "超标")
         status, body = self.call("GET", "/coag/ratio")
         self.assertEqual(body["ratio"], 1.0)
 
@@ -148,6 +150,53 @@ class ConsoleCase(unittest.TestCase):
         status, body = self.call("POST", "/clearwell/level", {"target": 12.0})
         self.assertEqual(body["level"], 12.0)
         self.assertEqual(body["min_level"], 0.0)
+
+    def test_turbidity_tier_lifecycle_over_http(self) -> None:
+        # Brief crossing of the watch line does not escalate.
+        status, body = self.call("POST", "/coag/turbidity", {"samples": [2.0], "reading_id": "w1"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["tier"], "normal")
+        self.assertFalse(body["changed"])
+        # A sustained crossing confirms the watch tier.
+        status, body = self.call("POST", "/coag/turbidity", {"samples": [2.0], "reading_id": "w2"})
+        self.assertEqual(body["tier"], "watch")
+        self.assertTrue(body["changed"])
+        # Replaying the same reading id changes nothing.
+        status, replay = self.call("POST", "/coag/turbidity", {"samples": [2.0], "reading_id": "w2"})
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["dose"], body["dose"])
+
+        # An interrupted reading holds the tier and is flagged.
+        status, body = self.call("POST", "/coag/turbidity", {"samples": [], "reading_id": "w3"})
+        self.assertEqual(body["tier"], "watch")
+        self.assertTrue(body["degraded"])
+        # Recovery through an exceed reading confirms immediately.
+        status, body = self.call("POST", "/coag/turbidity", {"samples": [5.0], "reading_id": "w4"})
+        self.assertTrue(body["recovered"])
+        self.assertEqual(body["tier"], "exceed")
+
+        # The console panel shows the tier and the audited transitions.
+        status, panel = self.call("GET", "/turbidity")
+        self.assertEqual(status, 200)
+        self.assertEqual(panel["state"]["tier"], "exceed")
+        self.assertEqual(panel["state"]["tier_label"], "超标")
+        kinds = [json.loads(event["detail"]) for event in panel["events"]]
+        self.assertEqual(kinds[0]["to"], "watch")
+        self.assertEqual(kinds[0]["tier_rounds_before"], 1)
+        statuses = [event["kind"] for event in panel["events"]]
+        self.assertEqual(
+            statuses, ["turbidity-tier", "turbidity-hold", "turbidity-recover", "turbidity-tier"]
+        )
+
+        # Downgrade needs a sustained clean window of three rounds.
+        for reading_id in ("d1", "d2"):
+            status, body = self.call(
+                "POST", "/coag/turbidity", {"samples": [0.5], "reading_id": reading_id}
+            )
+            self.assertEqual(body["tier"], "exceed")
+        status, body = self.call("POST", "/coag/turbidity", {"samples": [0.5], "reading_id": "d3"})
+        self.assertEqual(body["tier"], "normal")
+        self.assertEqual(body["dose"], 0.0)
 
     def test_filter_and_backwash_routes(self) -> None:
         for bed_id, zone, load in (("b1", 1, 4.0), ("b2", 2, 9.0), ("b3", 3, 1.0)):
@@ -224,11 +273,13 @@ class ConsoleCase(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(body["coag_dose"], 800.0)
-        self.assertEqual(body["turb_dose"], 3.0)
+        self.assertAlmostEqual(body["turb_dose"], 3.6)
+        self.assertEqual(body["turb_tier"], "exceed")
+        self.assertFalse(body["turb_degraded"])
         self.assertEqual(body["chlor_dose"], 0.65)
         self.assertEqual(body["rotation"], ["b1"])
         self.assertEqual(body["drains"], 1)
-        self.assertEqual(body["audit_count"], 2)
+        self.assertEqual(body["audit_count"], 3)
         self.assertTrue(body["ph_stable"])
         self.assertEqual(body["ph_adjustment"], 0.0)
 

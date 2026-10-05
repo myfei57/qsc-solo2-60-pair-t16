@@ -32,7 +32,7 @@ class Runtime:
         self.chlor_doser = ChlorDoser(store)
         self.bank = bank
         self.backwash = Controller(bank, store)
-        self.sampler = Sampler(coag_doser)
+        self.sampler = Sampler(coag_doser, store)
         self.calibration = Calibration(store)
         self.well = Well(store)
         self.accumulator = Accumulator(store)

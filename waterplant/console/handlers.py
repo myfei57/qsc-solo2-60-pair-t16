@@ -16,6 +16,9 @@ from waterplant.quota import Quota, check_quota, validate_amount
 from waterplant.reporting import audit_export, telemetry_export, to_csv
 from waterplant.scheduler import validate_threshold
 from waterplant.store import export_state
+from waterplant.turb import HOLD_AUDIT_KIND, RECOVER_AUDIT_KIND, TIER_AUDIT_KIND
+
+TURB_AUDIT_KINDS = (TIER_AUDIT_KIND, HOLD_AUDIT_KIND, RECOVER_AUDIT_KIND)
 
 from . import checks, history, ops
 from . import describe as describe_module
@@ -126,8 +129,20 @@ def coag_dose(server: "Server", request: Request) -> Response:
 
 
 def coag_turbidity(server: "Server", request: Request) -> Response:
-    dose = server.runtime.sampler.judge(request.float_list("samples"))
-    return json_response({"dose": dose})
+    outcome = server.runtime.sampler.judge(
+        request.float_list("samples"), request.str_field("reading_id")
+    )
+    return json_response(outcome.as_dict())
+
+
+def turbidity_state(server: "Server", request: Request) -> Response:
+    runtime = server.runtime
+    events = [
+        entry.as_dict()
+        for entry in runtime.auditor.entries()
+        if entry.kind in TURB_AUDIT_KINDS
+    ]
+    return json_response({"state": runtime.sampler.state().as_dict(), "events": events[-10:]})
 
 
 def coag_ratio(server: "Server", request: Request) -> Response:

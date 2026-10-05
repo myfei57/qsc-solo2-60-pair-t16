@@ -24,6 +24,7 @@ class Telemetry:
     coag_ratio: float
     chlor_target: float
     turbidity_verdict: float
+    turbidity_tier: str
     ph_value: float
     ph_stable: bool
     schedule_due: int
@@ -46,6 +47,7 @@ class Telemetry:
             "coag_ratio": self.coag_ratio,
             "chlor_target": self.chlor_target,
             "turbidity_verdict": self.turbidity_verdict,
+            "turbidity_tier": self.turbidity_tier,
             "ph_value": self.ph_value,
             "ph_stable": self.ph_stable,
             "schedule_due": self.schedule_due,
@@ -72,6 +74,7 @@ def collect(rt: Runtime) -> Telemetry:
         coag_ratio=rt.coag_doser.current_ratio(),
         chlor_target=rt.chlor_doser.current_target(),
         turbidity_verdict=rt.sampler.state().last_verdict,
+        turbidity_tier=rt.sampler.state().tier,
         ph_value=rt.stabilizer.current(),
         ph_stable=rt.stabilizer.is_stable(),
         schedule_due=len(rt.scheduler.due(rt.bank)),

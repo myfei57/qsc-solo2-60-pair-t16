@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 
@@ -31,7 +32,16 @@ from waterplant.store import (
     list_events,
     load_commands,
 )
-from waterplant.turb import Sampler, verdict_for
+from waterplant.turb import (
+    EXCEED,
+    HOLD_AUDIT_KIND,
+    NORMAL,
+    RECOVER_AUDIT_KIND,
+    TIER_AUDIT_KIND,
+    WATCH,
+    Sampler,
+    verdict_for,
+)
 
 
 class StoreCase(unittest.TestCase):
@@ -166,15 +176,129 @@ class DosingCase(unittest.TestCase):
 
 
 class TurbidityCase(unittest.TestCase):
-    def test_verdict_and_sampling(self) -> None:
+    def make_sampler(self, store: Store) -> Sampler:
+        return Sampler(CoagDoser(store), store)
+
+    def test_verdict_flooring_and_clean_dose(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store.open(f"{tmp}/state.json")
-            sampler = Sampler(CoagDoser(store))
-            self.assertEqual(sampler.judge([0.2, 0.4]), 0.0)
+            sampler = self.make_sampler(store)
+            outcome = sampler.judge([0.2, 0.4])
+            self.assertEqual(outcome.dose, 0.0)
+            self.assertEqual(outcome.tier, NORMAL)
             self.assertEqual(sampler.state().last_verdict, 0.0)
-            self.assertEqual(sampler.judge([4.0, 6.0]), 5.0)
             self.assertEqual(verdict_for(0.5), 0.0)
             self.assertIn("turbidity", sampler.describe())
+
+    def test_brief_watch_crossing_does_not_escalate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            sampler = self.make_sampler(store)
+            # One round above the watch line only pends; a clean round resets it.
+            self.assertEqual(sampler.judge([2.0]).tier, NORMAL)
+            self.assertEqual(sampler.judge([0.5]).tier, NORMAL)
+            self.assertEqual(sampler.judge([2.0]).tier, NORMAL)
+            outcome = sampler.judge([2.0])
+            self.assertEqual(outcome.tier, WATCH)
+            self.assertTrue(outcome.changed)
+            self.assertEqual(outcome.dose, 2.0)
+
+    def test_exceed_confirms_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            sampler = self.make_sampler(store)
+            outcome = sampler.judge([4.0, 6.0])
+            self.assertEqual(outcome.tier, EXCEED)
+            self.assertTrue(outcome.changed)
+            # Exceed tier boosts the dose above the plain ratio.
+            self.assertAlmostEqual(outcome.dose, 6.0)
+
+    def test_downgrade_needs_a_sustained_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            sampler = self.make_sampler(store)
+            sampler.judge([5.0])
+            self.assertEqual(sampler.state().tier, EXCEED)
+            # Two clean rounds only pend; the third confirms the downgrade.
+            self.assertEqual(sampler.judge([0.5]).tier, EXCEED)
+            self.assertEqual(sampler.judge([0.5]).tier, EXCEED)
+            outcome = sampler.judge([0.5])
+            self.assertEqual(outcome.tier, NORMAL)
+            self.assertEqual(outcome.reason, "downgrade:confirmed")
+            self.assertEqual(outcome.dose, 0.0)
+
+    def test_downgrade_lands_on_worst_window_tier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            sampler = self.make_sampler(store)
+            sampler.judge([5.0])
+            sampler.judge([2.5])
+            sampler.judge([0.5])
+            outcome = sampler.judge([2.8])
+            self.assertEqual(outcome.tier, WATCH)
+            self.assertAlmostEqual(outcome.dose, 2.8)
+
+    def test_interrupted_reading_holds_tier_and_marks_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            sampler = self.make_sampler(store)
+            auditor = Auditor(store)
+            sampler.judge([2.0], "r1")
+            sampler.judge([2.0], "r2")
+            self.assertEqual(sampler.state().tier, WATCH)
+            held = sampler.judge([], "r3")
+            self.assertEqual(held.tier, WATCH)
+            self.assertTrue(held.degraded)
+            self.assertEqual(held.dose, 2.0)
+            again = sampler.judge([], "r4")
+            self.assertEqual(again.missed_rounds, 2)
+            # Only the first interrupted round writes a hold entry.
+            self.assertEqual(len(auditor.filter(HOLD_AUDIT_KIND)), 1)
+
+    def test_recovery_and_replay_are_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            sampler = self.make_sampler(store)
+            auditor = Auditor(store)
+            sampler.judge([], "r1")
+            recovered = sampler.judge([5.0], "r2")
+            self.assertTrue(recovered.recovered)
+            self.assertEqual(recovered.tier, EXCEED)
+            replay = sampler.judge([5.0], "r2")
+            self.assertTrue(replay.replayed)
+            self.assertEqual(replay.tier, EXCEED)
+            self.assertEqual(replay.dose, recovered.dose)
+            self.assertEqual(len(auditor.filter(RECOVER_AUDIT_KIND)), 1)
+            self.assertEqual(len(auditor.filter(TIER_AUDIT_KIND)), 1)
+            self.assertEqual(sampler.state().tier_rounds, 1)
+
+    def test_tier_change_audit_carries_duration_and_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            sampler = self.make_sampler(store)
+            auditor = Auditor(store)
+            sampler.judge([0.5])
+            sampler.judge([0.5])
+            sampler.judge([5.0])
+            entries = auditor.filter(TIER_AUDIT_KIND)
+            self.assertEqual(len(entries), 1)
+            detail = json.loads(entries[0].detail)
+            self.assertEqual(detail["from"], NORMAL)
+            self.assertEqual(detail["to"], EXCEED)
+            self.assertEqual(detail["tier_rounds_before"], 2)
+            self.assertEqual(detail["dose"], 6.0)
+            self.assertIn("exceed line", detail["evidence"])
+
+    def test_state_survives_a_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            sampler = self.make_sampler(store)
+            sampler.judge([2.0], "r1")
+            sampler.judge([2.0], "r2")
+            reopened = self.make_sampler(Store.open(f"{tmp}/state.json"))
+            self.assertEqual(reopened.state().tier, WATCH)
+            replay = reopened.judge([2.0], "r2")
+            self.assertTrue(replay.replayed)
 
 
 class CalibrationCase(unittest.TestCase):
