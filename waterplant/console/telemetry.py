@@ -24,6 +24,14 @@ class Telemetry:
     coag_ratio: float
     chlor_target: float
     turbidity_verdict: float
+    turbidity_grade: str
+    turbidity_pending: str
+    turbidity_held: bool
+    turbidity_interrupted: bool
+    turbidity_grade_cycles: int
+    turbidity_held_cycles: int
+    turbidity_interrupted_cycles: int
+    turbidity_dose: float
     ph_value: float
     ph_stable: bool
     schedule_due: int
@@ -46,6 +54,14 @@ class Telemetry:
             "coag_ratio": self.coag_ratio,
             "chlor_target": self.chlor_target,
             "turbidity_verdict": self.turbidity_verdict,
+            "turbidity_grade": self.turbidity_grade,
+            "turbidity_pending": self.turbidity_pending,
+            "turbidity_held": self.turbidity_held,
+            "turbidity_interrupted": self.turbidity_interrupted,
+            "turbidity_grade_cycles": self.turbidity_grade_cycles,
+            "turbidity_held_cycles": self.turbidity_held_cycles,
+            "turbidity_interrupted_cycles": self.turbidity_interrupted_cycles,
+            "turbidity_dose": self.turbidity_dose,
             "ph_value": self.ph_value,
             "ph_stable": self.ph_stable,
             "schedule_due": self.schedule_due,
@@ -58,6 +74,7 @@ class Telemetry:
 def collect(rt: Runtime) -> Telemetry:
     """Read every counter without mutating the control state."""
 
+    turb = rt.sampler.state()
     return Telemetry(
         store_keys=rt.store.count(),
         filter_beds=rt.bank.count(),
@@ -71,7 +88,15 @@ def collect(rt: Runtime) -> Telemetry:
         clearwell_level=rt.well.level(),
         coag_ratio=rt.coag_doser.current_ratio(),
         chlor_target=rt.chlor_doser.current_target(),
-        turbidity_verdict=rt.sampler.state().last_verdict,
+        turbidity_verdict=turb.last_verdict,
+        turbidity_grade=turb.grade,
+        turbidity_pending=turb.pending,
+        turbidity_held=turb.held,
+        turbidity_interrupted=turb.interrupted,
+        turbidity_grade_cycles=turb.grade_cycles,
+        turbidity_held_cycles=turb.held_cycles,
+        turbidity_interrupted_cycles=turb.interrupted_cycles,
+        turbidity_dose=turb.dose,
         ph_value=rt.stabilizer.current(),
         ph_stable=rt.stabilizer.is_stable(),
         schedule_due=len(rt.scheduler.due(rt.bank)),

@@ -125,9 +125,17 @@ def coag_dose(server: "Server", request: Request) -> Response:
     return json_response({"dose": dose})
 
 
+def turbidity_state(server: "Server", request: Request) -> Response:
+    return json_response(server.runtime.sampler.state().as_dict())
+
+
 def coag_turbidity(server: "Server", request: Request) -> Response:
-    dose = server.runtime.sampler.judge(request.float_list("samples"))
-    return json_response({"dose": dose})
+    # An absent or null window is a reading interruption (partial failure);
+    # an empty list is an explicit empty window and is judged the same way.
+    samples = None if "samples" not in request.payload or request.payload["samples"] is None else request.float_list("samples")
+    reading_id = request.str_field("reading_id")
+    outcome = server.runtime.sampler.judge(samples, reading_id)
+    return json_response(outcome.as_dict())
 
 
 def coag_ratio(server: "Server", request: Request) -> Response:

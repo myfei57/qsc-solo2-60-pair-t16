@@ -45,6 +45,7 @@ class ConsoleCase(unittest.TestCase):
             "intake",
             "ph",
             "inventory",
+            "turbidity",
         })
 
         status, snapshot = self.call("GET", "/snapshot")
@@ -131,7 +132,30 @@ class ConsoleCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["dose"], 1500.0)
         status, body = self.call("POST", "/coag/turbidity", {"samples": [4.0, 6.0]})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["grade"], "normal")
         self.assertEqual(body["dose"], 5.0)
+        self.assertEqual(body["verdict"], 5.0)
+        status, body = self.call("GET", "/turbidity")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["grade"], "normal")
+        self.assertEqual(body["dose"], 5.0)
+        # Persistent high readings escalate after the confirmation window.
+        for _ in range(3):
+            status, body = self.call("POST", "/coag/turbidity", {"samples": [6.0]})
+        self.assertEqual(body["grade"], "watch")
+        # An interrupted window holds the band and marks the partial failure.
+        status, body = self.call("POST", "/coag/turbidity", {})
+        self.assertEqual(body["interrupted"], True)
+        self.assertEqual(body["held"], True)
+        self.assertEqual(body["grade"], "watch")
+        # Replaying the same reading id is idempotent and adds no audit entry.
+        _, before = self.call("GET", "/audit/summary")
+        status, replay = self.call("POST", "/coag/turbidity", {"reading_id": "hold-1"})
+        status, again = self.call("POST", "/coag/turbidity", {"reading_id": "hold-1"})
+        self.assertEqual(replay["reading"], again["reading"])
+        _, after = self.call("GET", "/audit/summary")
+        self.assertEqual(after["count"], before["count"])
         status, body = self.call("GET", "/coag/ratio")
         self.assertEqual(body["ratio"], 1.0)
 
@@ -225,6 +249,9 @@ class ConsoleCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["coag_dose"], 800.0)
         self.assertEqual(body["turb_dose"], 3.0)
+        self.assertEqual(body["turb_grade"], "normal")
+        self.assertFalse(body["turb_interrupted"])
+        self.assertIn("turb_basis", body)
         self.assertEqual(body["chlor_dose"], 0.65)
         self.assertEqual(body["rotation"], ["b1"])
         self.assertEqual(body["drains"], 1)

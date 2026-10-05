@@ -16,7 +16,9 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
     """Walk the whole line once, in production order."""
 
     flow = request.float_field("flow")
-    samples = request.float_list("samples")
+    samples_raw = request.payload.get("samples")
+    samples = None if samples_raw is None else request.float_list("samples")
+    reading_id = request.str_field("reading_id")
     demand = request.float_field("demand")
     level = request.float_field("level")
     bed_id = request.str_field("bed_id")
@@ -29,10 +31,13 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
     validate_amount(amount)
     validate_level(level)
 
-    rt.flow_repository.record(Sensor(flow=flow, turbidity=mix(samples)))
+    rt.flow_repository.record(Sensor(flow=flow, turbidity=mix(samples or [])))
     rt.trend.record(flow)
     coag_dose = rt.coag_doser.update_flow_and_dose(flow)
-    turb_dose = rt.sampler.judge(samples)
+    # Timing dependency: confirm the turbidity band first, then take the dose
+    # computed against that band's verdict (not a re-computed raw reading).
+    turb_outcome = rt.sampler.judge(samples, reading_id)
+    turb_dose = turb_outcome.dose
     ph_verdict = rt.stabilizer.stabilize()
     rt.well.update_residual_demand(demand)
     chlor_dose = rt.chlor_doser.apply_residual() if ph_verdict.stable else 0.0
@@ -47,6 +52,14 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
         {
             "coag_dose": coag_dose,
             "turb_dose": turb_dose,
+            "turb_grade": turb_outcome.grade,
+            "turb_pending": turb_outcome.pending,
+            "turb_held": turb_outcome.held,
+            "turb_interrupted": turb_outcome.interrupted,
+            "turb_grade_cycles": turb_outcome.grade_cycles,
+            "turb_held_cycles": turb_outcome.held_cycles,
+            "turb_interrupted_cycles": turb_outcome.interrupted_cycles,
+            "turb_basis": turb_outcome.basis,
             "chlor_dose": chlor_dose,
             "min_level": min_level,
             "level": rt.well.level(),

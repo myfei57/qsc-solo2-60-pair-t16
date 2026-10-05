@@ -26,6 +26,15 @@ def text_report(rt: Runtime) -> str:
         f"filter: {describe['filter']}",
         f"backwash: {describe['backwash']}",
         f"turbidity: {describe['turbidity']}",
+        (
+            f"turbidity grade={telemetry.turbidity_grade} "
+            f"grade_cycles={telemetry.turbidity_grade_cycles} "
+            f"pending={telemetry.turbidity_pending or '-'} "
+            f"held={telemetry.turbidity_held} held_cycles={telemetry.turbidity_held_cycles} "
+            f"interrupted={telemetry.turbidity_interrupted} "
+            f"interrupted_cycles={telemetry.turbidity_interrupted_cycles} "
+            f"verdict={telemetry.turbidity_verdict:.4f} dose={telemetry.turbidity_dose:.4f}"
+        ),
         f"flow: {describe['flow']}",
         f"clearwell: {describe['clearwell']}",
         f"quota: {describe['quota']}",

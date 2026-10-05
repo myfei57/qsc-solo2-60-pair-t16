@@ -31,7 +31,15 @@ from waterplant.store import (
     list_events,
     load_commands,
 )
-from waterplant.turb import Sampler, verdict_for
+from waterplant.turb import (
+    EXCEED_LINE,
+    WATCH_LINE,
+    Grade,
+    GradeBook,
+    Sampler,
+    band_for,
+    verdict_for,
+)
 
 
 class StoreCase(unittest.TestCase):
@@ -166,15 +174,163 @@ class DosingCase(unittest.TestCase):
 
 
 class TurbidityCase(unittest.TestCase):
+    def _sampler(self, store: Store) -> Sampler:
+        return Sampler(store, CoagDoser(store), Auditor(store))
+
     def test_verdict_and_sampling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store.open(f"{tmp}/state.json")
-            sampler = Sampler(CoagDoser(store))
-            self.assertEqual(sampler.judge([0.2, 0.4]), 0.0)
+            sampler = self._sampler(store)
+            outcome = sampler.judge([0.2, 0.4])
+            self.assertEqual(outcome.grade, "normal")
+            self.assertEqual(outcome.dose, 0.0)
             self.assertEqual(sampler.state().last_verdict, 0.0)
-            self.assertEqual(sampler.judge([4.0, 6.0]), 5.0)
+            outcome = sampler.judge([4.0, 6.0])
+            self.assertEqual(outcome.grade, "normal")
+            self.assertEqual(outcome.dose, 5.0)
             self.assertEqual(verdict_for(0.5), 0.0)
             self.assertIn("turbidity", sampler.describe())
+
+    def test_bands_and_lines(self) -> None:
+        self.assertEqual(band_for(0.0), Grade.NORMAL)
+        self.assertEqual(band_for(WATCH_LINE), Grade.WATCH)
+        self.assertEqual(band_for(EXCEED_LINE - 0.01), Grade.WATCH)
+        self.assertEqual(band_for(EXCEED_LINE), Grade.EXCEEDED)
+
+    def test_normal_to_watch_needs_three_persistent_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            book = GradeBook(Store.open(f"{tmp}/state.json"))
+            for index in range(2):
+                outcome = book.apply(f"w{index}", 6.0)
+                self.assertEqual(outcome.grade, "normal")
+                self.assertEqual(outcome.pending, "watch")
+                self.assertTrue(outcome.held)
+                self.assertIn("capped", outcome.basis)
+            outcome = book.apply("w2", 6.0)
+            self.assertEqual(outcome.grade, "watch")
+            self.assertEqual(outcome.pending, "")
+            self.assertEqual([event.kind for event in outcome.events], ["turbidity"])
+
+    def test_single_dip_below_watch_line_resets_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            book = GradeBook(Store.open(f"{tmp}/state.json"))
+            book.apply("a", 6.0)
+            book.apply("b", 6.0)
+            book.apply("c", 2.0)
+            self.assertEqual(book.apply("d", 6.0).grade, "normal")
+            self.assertEqual(book.apply("e", 6.0).grade, "normal")
+            self.assertEqual(book.apply("f", 6.0).grade, "watch")
+
+    def test_watch_to_exceeded_needs_two_persistent_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            book = GradeBook(Store.open(f"{tmp}/state.json"))
+            for rid in ("w0", "w1", "w2"):
+                book.apply(rid, 6.0)
+            self.assertEqual(book.grade, Grade.WATCH)
+            outcome = book.apply("e0", 12.0)
+            self.assertEqual(outcome.grade, "watch")
+            self.assertEqual(outcome.pending, "exceeded")
+            outcome = book.apply("e1", 12.0)
+            self.assertEqual(outcome.grade, "exceeded")
+            self.assertEqual(outcome.pending, "")
+
+    def test_downgrade_waits_for_full_window_not_one_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            book = GradeBook(Store.open(f"{tmp}/state.json"))
+            for rid in ("w0", "w1", "w2"):
+                book.apply(rid, 6.0)
+            self.assertEqual(book.grade, Grade.WATCH)
+            book.apply("d0", 1.0)
+            self.assertEqual(book.grade, Grade.WATCH)
+            book.apply("d1", 1.0)
+            self.assertEqual(book.grade, Grade.WATCH)
+            outcome = book.apply("d2", 1.0)
+            self.assertEqual(outcome.grade, "normal")
+            self.assertTrue(any("downgraded" in event.detail for event in outcome.events))
+
+    def test_interruption_holds_band_freezes_timers_and_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            auditor = Auditor(store)
+            sampler = Sampler(store, CoagDoser(store), auditor)
+            for rid in ("w0", "w1", "w2"):
+                sampler.judge([6.0], rid)
+            self.assertEqual(sampler.state().grade, "watch")
+            first = sampler.judge(None, "i0")
+            self.assertTrue(first.interrupted)
+            self.assertTrue(first.held)
+            self.assertEqual(first.grade, "watch")
+            self.assertEqual(first.verdict, 6.0)
+            self.assertEqual(first.dose, 6.0)
+            # Repeated interruption while already interrupted emits no event.
+            again = sampler.judge(None, "i1")
+            self.assertEqual(again.grade, "watch")
+            before = auditor.count()
+            # Idempotent replay of the same reading id: no new audit entry.
+            replay = sampler.judge(None, "i0")
+            self.assertEqual(replay.interrupted, True)
+            self.assertEqual(replay.dose, first.dose)
+            self.assertEqual(auditor.count(), before)
+            # Recovery resumes; a single valid cycle must not instantly downgrade.
+            recovered = sampler.judge([1.0], "r0")
+            self.assertFalse(recovered.interrupted)
+            self.assertEqual(recovered.grade, "watch")
+            self.assertTrue(any("recovered" in event.detail for event in recovered.events))
+
+    def test_interrupted_pending_window_is_frozen_then_resumed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            book = GradeBook(Store.open(f"{tmp}/state.json"))
+            book.apply("a", 6.0)
+            book.apply("b", 6.0)
+            book.apply("gap", None)
+            book.apply("gap2", None)
+            # Two pre-interruption watch cycles still count; one more confirms.
+            self.assertEqual(book.apply("c", 6.0).grade, "watch")
+
+    def test_duplicate_reading_id_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            auditor = Auditor(store)
+            sampler = Sampler(store, CoagDoser(store), auditor)
+            first = sampler.judge([6.0], "dup")
+            second = sampler.judge([6.0], "dup")
+            self.assertEqual(first.grade, second.grade)
+            self.assertEqual(first.dose, second.dose)
+            self.assertEqual(auditor.count(), 0)
+
+    def test_old_reading_id_replays_after_intervening_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            auditor = Auditor(store)
+            sampler = Sampler(store, CoagDoser(store), auditor)
+            for rid in ("w0", "w1", "w2"):
+                sampler.judge([6.0], rid)
+            gapped = sampler.judge(None, "gap")
+            sampler.judge([6.0], "later1")
+            sampler.judge([6.0], "later2")
+            before = auditor.count()
+            replay = sampler.judge(None, "gap")
+            self.assertEqual(replay.grade, gapped.grade)
+            self.assertEqual(replay.interrupted, True)
+            self.assertEqual(replay.verdict, gapped.verdict)
+            self.assertEqual(auditor.count(), before)
+
+    def test_state_persists_across_grade_books(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            for rid in ("w0", "w1", "w2"):
+                GradeBook(store).apply(rid, 6.0)
+            self.assertEqual(GradeBook(store).grade, Grade.WATCH)
+
+    def test_pending_upgrade_caps_dosing_basis_to_confirmed_band(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sampler = self._sampler(Store.open(f"{tmp}/state.json"))
+            outcome = sampler.judge([12.0], "x0")
+            self.assertEqual(outcome.grade, "normal")
+            self.assertEqual(outcome.pending, "watch")
+            # Basis is capped at the watch entry line while confirmation runs.
+            self.assertEqual(outcome.verdict, WATCH_LINE)
+            self.assertEqual(outcome.dose, WATCH_LINE)
 
 
 class CalibrationCase(unittest.TestCase):

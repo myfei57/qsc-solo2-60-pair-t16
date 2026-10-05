@@ -29,6 +29,20 @@ def run_checks(rt: Runtime) -> list[dict[str, str]]:
         checks.append({"name": "ph", "status": "ok", "detail": "ph in the stable band"})
     else:
         checks.append({"name": "ph", "status": "warn", "detail": "ph outside the stable band"})
+    turb = rt.sampler.state()
+    if turb.interrupted:
+        checks.append(
+            {"name": "turbidity", "status": "warn", "detail": f"reading interrupted; holding {turb.grade}"}
+        )
+    elif turb.grade == "exceeded":
+        checks.append(
+            {"name": "turbidity", "status": "fail", "detail": f"exceeded for {turb.grade_cycles} cycles"}
+        )
+    elif turb.grade == "watch" or turb.pending:
+        detail = f"watch for {turb.grade_cycles} cycles" if turb.grade == "watch" else f"pending {turb.pending}"
+        checks.append({"name": "turbidity", "status": "warn", "detail": detail})
+    else:
+        checks.append({"name": "turbidity", "status": "ok", "detail": "normal band"})
     alerts = rt.inventory.needs_reorder()
     if alerts:
         checks.append(

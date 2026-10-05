@@ -24,6 +24,7 @@ class Runtime:
     def __init__(self, store: Store) -> None:
         bank = Bank()
         coag_doser = CoagDoser(store)
+        auditor = Auditor(store)
         self.store = store
         self.flow_repository = FlowRepository(store)
         self.inlet = InletController()
@@ -32,11 +33,11 @@ class Runtime:
         self.chlor_doser = ChlorDoser(store)
         self.bank = bank
         self.backwash = Controller(bank, store)
-        self.sampler = Sampler(coag_doser)
+        self.auditor = auditor
+        self.sampler = Sampler(store, coag_doser, auditor)
         self.calibration = Calibration(store)
         self.well = Well(store)
         self.accumulator = Accumulator(store)
-        self.auditor = Auditor(store)
         self.stabilizer = Stabilizer(store)
         self.scheduler = Scheduler(store)
         self.trend = Trend(store)
